@@ -16,7 +16,7 @@ use quickraw::{data, DemosaicingMethod, Export, Input, Output, OutputType};
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use rgb::*;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use tiff::decoder::Limits;
@@ -43,7 +43,7 @@ pub fn open_image(
         .replace("tiff", "tif")
         .replace("jpeg", "jpg");
 
-    let unchecked_extensions = ["svg"];
+    let unchecked_extensions = ["svg", "kra"];
 
     if let Ok(fmt) = FileFormat::from_file(&img_location) {
         debug!("Detected as {:?} {}", fmt.name(), fmt.extension());
@@ -230,7 +230,7 @@ pub fn open_image(
 
             let render_scale = 2.;
             let mut opt = usvg::Options::default();
-            
+
             let fontdb = opt.fontdb_mut();
             fontdb.load_system_fonts();
             fontdb.load_font_data(FONT.to_vec());
@@ -243,16 +243,22 @@ pub fn open_image(
 
             let svg_data = std::fs::read(img_location)?;
             if let Ok(tree) = usvg::Tree::from_data(&svg_data, &opt) {
-                let pixmap_size = tree.size().to_int_size().scale_by(render_scale).context("Can't get SVG size")?;
+                let pixmap_size = tree
+                    .size()
+                    .to_int_size()
+                    .scale_by(render_scale)
+                    .context("Can't get SVG size")?;
 
-                if let Some(mut pixmap) = tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height()) {
+                if let Some(mut pixmap) =
+                    tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height())
+                {
                     let mut fontdb = usvg::fontdb::Database::new();
                     fontdb.load_system_fonts();
                     fontdb.load_font_data(FONT.to_vec());
                     fontdb.set_cursive_family("Inter");
                     fontdb.set_sans_serif_family("Inter");
                     fontdb.set_serif_family("Inter");
-                 
+
                     let render_ts = tiny_skia::Transform::from_scale(render_scale, render_scale);
                     resvg::render(&tree, render_ts, &mut pixmap.as_mut());
                     let buf: RgbaImage = image::ImageBuffer::from_raw(
@@ -763,6 +769,11 @@ pub fn open_image(
                 return Ok(receiver);
             }
         }
+        "kra" => {
+            let i = load_kra(&img_location)?;
+            _ = sender.send(Frame::new_still(i.to_rgba8()));
+            return Ok(receiver);
+        }
         "tif" | "tiff" => match load_tiff(&img_location) {
             Ok(tiff) => {
                 _ = sender.send(Frame::new_still(tiff));
@@ -960,4 +971,14 @@ fn autoscale(values: &Vec<f32>) -> Vec<f32> {
         .into_iter()
         .map(|v| fit(*v, lowest, highest, 0., 255.))
         .collect()
+}
+
+fn load_kra(path: &Path) -> Result<DynamicImage> {
+    let f = File::open(path)?;
+    let mut archive = zip::ZipArchive::new(f)?;
+    // https://docs.krita.org/en/general_concepts/file_formats/file_kra.html
+    let mut merged_image = archive.by_name("mergedimage.png")?;
+    let mut image_bytes = Vec::<u8>::new();
+    merged_image.read_to_end(&mut image_bytes)?;
+    Ok(image::load_from_memory(&image_bytes)?)
 }
